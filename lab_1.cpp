@@ -4,7 +4,93 @@
 #include <random>
 #include <cstdint>
 #include <omp.h>
+#include <fstream> 
+#include <cstdlib>
+#include <string>
 
+bool loadPatternToCenter(std::vector<uint8_t>& field, int X, const std::string& filename)
+{
+    std::ifstream file(filename);
+    if (!file.is_open())
+    {
+        std::cerr << "Cannot open pattern file: " << filename << std::endl;
+        return false;
+    }
+
+    int patternSize = 0;
+    file >> patternSize;
+    if (patternSize <= 0 || patternSize > X)
+    {
+        std::cerr << "Invalid pattern size" << std::endl;
+        return false;
+    }
+
+    const int width = X + 2;
+    int offset = (X - patternSize) / 2 + 1;
+
+    for (int i = 0; i < patternSize; ++i)
+    {
+        for (int j = 0; j < patternSize; ++j)
+        {
+            int realI = offset + i;
+            int realJ = offset + j;
+            std::size_t index = static_cast<std::size_t>(realI) * width + realJ;
+            field[index] = 0;
+        }
+    }
+
+    
+    int i, j;
+    while (file >> i >> j)
+    {
+        if (i >= 0 && i < patternSize && j >= 0 && j < patternSize)
+        {
+            int realI = offset + i;
+            int realJ = offset + j;
+            std::size_t index = static_cast<std::size_t>(realI) * width + realJ;
+            field[index] = 1;
+        }
+    }
+
+    file.close();
+    return true;
+}
+
+// центральный кусок newField обратно в файл
+bool saveCenterPattern(const std::vector<uint8_t>& field, int X, int patternSize, const std::string& filename)
+{
+    std::ofstream file(filename);
+    if (!file.is_open())
+    {
+        std::cerr << "Cannot open result pattern file: " << filename << std::endl;
+        return false;
+    }
+
+    file << patternSize << "\n";
+
+    int offset = (X - patternSize) / 2 + 1;
+    const int width = X + 2;
+
+    for (int i = 0; i < patternSize; ++i)
+    {
+        for (int j = 0; j < patternSize; ++j)
+        {
+            int realI = offset + i;
+            int realJ = offset + j;
+            std::size_t index = static_cast<std::size_t>(realI) * width + realJ;
+
+            if (field[index] == 1)
+            {
+                file << i << " " << j << "\n";
+            }
+        }
+    }
+
+    file.close();
+    return true;
+}
+
+/////////////////////////////////////////////////////////////
 inline int countAliveNeighbors(const std::vector<uint8_t>& field, 
                                int i, 
                                int j, 
@@ -77,25 +163,6 @@ void stepGameOfLife(const std::vector<uint8_t>& oldField,
     }
 }
 
-void printField(const std::vector<uint8_t>& field, int X)
-{
-    const int width = X + 2;
-
-    for (int i = 1; i <= X; ++i)
-    {
-        for (int j = 1; j <= X; ++j)
-        {
-            std::size_t index = 
-                static_cast<std::size_t>(i) * static_cast<std::size_t>(width) + 
-                static_cast<std::size_t>(j);
-
-            std::cout << (field[index] == 1 ? "X " : ". ");
-        }
-        std::cout << std::endl;
-    }
-    std::cout << std::endl;
-}
-
 void generateRandomField(std::vector<uint8_t>& field, int X, unsigned int seed)
 {
     const int width = X + 2;
@@ -121,7 +188,7 @@ int main()
     int X = 0;
     double startTime = 0.0;
     double endTime = 0.0;
-    double elapsedTime = 0.0;
+    double avgTime = 0.0;
 
     std::cout << "Enter field size X: ";
 
@@ -150,18 +217,76 @@ int main()
     const unsigned int seed = 13;
 
     generateRandomField(oldField, X, seed);
+    ////////////////////////////////////////////////////////
+    int editorResult = system("py visualizer.py edit");
+    if (editorResult != 0)
+    {
+        std::cerr << "Failed to open pattern editor!" << std::endl;
+        return 1;
+    }
 
-    std::cout << "Initial state:" << std::endl;
 
+    if (!loadPatternToCenter(oldField, X, "pattern.txt"))
+    {
+        std::cerr << "Failed to load pattern!" << std::endl;
+        return 1;
+    }
+    
+    const int threadsCounts[] = {1,2,4,6,8};
+    const int numTests = sizeof(threadsCounts) / sizeof(threadsCounts[0]);
+    const int RUNS = 10;
 
-    startTime = omp_get_wtime();
-    stepGameOfLife(oldField, newField, X);
-    endTime = omp_get_wtime();
+    std::ofstream csv("results.csv");
+    if (!csv.is_open())
+    {
+        std::cerr << "Cannot open results.csv for writing!" << std::endl;
+        return 1;
+    }
+    csv << "threads,avg_time_sec,field_size\n";
 
-    elapsedTime = endTime - startTime;
-    std::cout << "State after one step:" << std::endl;
-    // printField(newField, X);
-    std::cout << "Step execution time: " << elapsedTime << " seconds" << std::endl;
+    std::cout << "Field size: " << X << " x " << X << std::endl;
+    std::cout << "Threads | Time (seconds)" << std::endl;
+
+    for (int t = 0; t < numTests; ++t)
+    {
+        int numThreads = threadsCounts[t];
+
+        omp_set_num_threads(numThreads);
+        double totalTime = 0.0;
+        for(int run =0; run <RUNS; ++run)
+        {
+            newField = oldField;
+
+            startTime = omp_get_wtime();
+            stepGameOfLife(oldField, newField, X);
+            endTime = omp_get_wtime();
+
+            totalTime += (endTime - startTime);
+        }  
+        avgTime = totalTime/ RUNS;
+        
+        std::cout << "   " << numThreads 
+                  << "    | " << avgTime << std::endl;
+
+        csv << numThreads << "," << avgTime << "," << X << "\n";
+    }
+
+    csv.close();
+    
+    saveCenterPattern(newField, X, 15, "result_pattern.txt");
+
+    system("py visualizer.py view");
+    
+    int result = system("py -3 plot_results.py");
+
+    if (result != 0)
+    {
+        std::cout << "Warning: failed to run plot_results.py" << std::endl;
+        std::cout << "You can run it manually later." << std::endl;
+    }
 
     return 0;
 }
+
+
+
